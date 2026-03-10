@@ -9,6 +9,11 @@ const SECURITY_BLOCK_MARKER = "<!--CONTENT_SECURITY_BLOCK-->";
 /** 安全拦截后返回给微信用户的通用提示文本（不暴露具体拦截原因） */
 const SECURITY_BLOCK_USER_MESSAGE = "抱歉，我无法处理该任务，让我们换个任务试试看？";
 
+const summarizeText = (text?: string | null): string => {
+  if (!text) return "(empty)";
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text;
+};
+
 // ============================================
 // 工具函数
 // ============================================
@@ -65,7 +70,7 @@ export const handleMessage = async (message: FuwuhaoMessage): Promise<string | n
   console.log("[wechat-access] 收到消息:", {
     类型: messageType,
     消息ID: messageId,
-    内容: content,
+    内容预览: summarizeText(content),
     用户ID: userId,
     时间戳: timestamp
   });
@@ -104,7 +109,7 @@ export const handleMessage = async (message: FuwuhaoMessage): Promise<string | n
   // 用于监控、分析、计费等场景
   runtime.channel.activity.record({
     channel: "wechat-access-unqclawed",      // 频道标识
-    accountId: "default",    // 账号 ID
+    accountId: route.accountId ?? "default",    // 账号 ID
     direction: "inbound",    // 方向：inbound=入站（用户发送），outbound=出站（Bot 回复）
   });
   
@@ -152,7 +157,11 @@ export const handleMessage = async (message: FuwuhaoMessage): Promise<string | n
           payload: { text?: string; mediaUrl?: string; mediaUrls?: string[]; isError?: boolean; channelData?: unknown },
           info: { kind: string }
         ) => {
-          console.log(`[wechat-access] Agent ${info.kind} 回复:`, payload, info);
+          console.log(`[wechat-access] Agent ${info.kind} 回复`, {
+            hasText: !!payload.text,
+            textPreview: summarizeText(payload.text),
+            isError: payload.isError === true,
+          });
 
           if (info.kind === "tool") {
             // ============================================
@@ -160,7 +169,10 @@ export const handleMessage = async (message: FuwuhaoMessage): Promise<string | n
             // ============================================
             // Agent 调用工具（如 write、read_file 等）后的结果
             // 通常不需要直接返回给用户，仅记录日志
-            console.log("[wechat-access] 工具调用结果:", payload);
+            console.log("[wechat-access] 工具调用结果", {
+              hasText: !!payload.text,
+              isError: payload.isError === true,
+            });
           } else if (info.kind === "block") {
             // ============================================
             // 流式分块回复
@@ -191,13 +203,15 @@ export const handleMessage = async (message: FuwuhaoMessage): Promise<string | n
                 responseText = payload.text;
               }
             }
-            console.log("[wechat-access] 最终回复:", payload);
+            console.log("[wechat-access] 最终回复", {
+              textPreview: summarizeText(payload.text),
+            });
           }
 
           // 记录出站活动统计（Bot 回复）
           runtime.channel.activity.record({
             channel: "wechat-access-unqclawed",
-            accountId: "default",
+            accountId: route.accountId ?? "default",
             direction: "outbound",  // 出站：Bot 发送给用户
           });
         },
@@ -298,7 +312,7 @@ export const handleMessageStream = async (
   console.log("[wechat-access] 流式处理消息:", {
     类型: messageType,
     消息ID: messageId,
-    内容: content,
+    内容预览: summarizeText(content),
     用户ID: userId,
   });
 
@@ -323,7 +337,7 @@ export const handleMessageStream = async (
   // ============================================
   runtime.channel.activity.record({
     channel: "wechat-access-unqclawed",
-    accountId: "default",
+    accountId: route.accountId ?? "default",
     direction: "inbound",
   });
   
@@ -340,7 +354,11 @@ export const handleMessageStream = async (
   console.log("[wechat-access] 注册 onAgentEvent 监听器...");
   let lastEmittedText = ""; // 用于去重，只发送增量文本
   
-const unsubscribeAgentEvents = onAgentEvent((evt: AgentEventPayload) => {
+  const unsubscribeAgentEvents = await onAgentEvent((evt: AgentEventPayload) => {
+    if (evt.sessionKey !== route.sessionKey) {
+      return;
+    }
+
     // 记录所有事件（调试用）
     console.log(`[wechat-access] 收到 AgentEvent: stream=${evt.stream}, runId=${evt.runId}`);
     
@@ -468,7 +486,7 @@ const unsubscribeAgentEvents = onAgentEvent((evt: AgentEventPayload) => {
     const messagesConfig = runtime.channel.reply.resolveEffectiveMessagesConfig(cfg, route.agentId);
     
     console.log("[wechat-access] 开始流式调用 Agent...");
-    console.log("[wechat-access] ctx:", JSON.stringify(ctx));
+    console.log("[wechat-access] ctx 已构建", { sessionKey: route.sessionKey, agentId: route.agentId });
     
     const dispatchResult = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
@@ -479,7 +497,11 @@ const unsubscribeAgentEvents = onAgentEvent((evt: AgentEventPayload) => {
           payload: { text?: string; mediaUrl?: string; mediaUrls?: string[]; isError?: boolean; channelData?: unknown },
           info: { kind: string }
         ) => {
-          console.log(`[wechat-access] 流式 ${info.kind} 回复:`, payload, info);
+          console.log(`[wechat-access] 流式 ${info.kind} 回复`, {
+            hasText: !!payload.text,
+            textPreview: summarizeText(payload.text),
+            isError: payload.isError === true,
+          });
 
           if (info.kind === "tool") {
             // 工具调用结果

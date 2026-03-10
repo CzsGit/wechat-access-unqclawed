@@ -15,6 +15,7 @@ import type {
   CancelMessage,
   ContentBlock,
   ToolCall,
+  PromptResponsePayload,
 } from "./types.js";
 import { onAgentEvent, type AgentEventPayload } from "../common/agent-events.js";
 import type { WechatAccessWebSocketClient } from "./websocket-client.js";
@@ -36,7 +37,6 @@ const SECURITY_BLOCK_USER_MESSAGE = "抱歉，我无法处理该任务，让我�
  */
 import { getWecomRuntime } from "../common/runtime.js";
 import {
-  extractTextFromContent,
   buildWebSocketMessageContext,
 } from "./message-adapter.js";
 
@@ -53,8 +53,11 @@ import {
  * 将其标记为已取消，并取消 Agent 事件订阅。
  */
 interface ActiveTurn {
+  accountId: string;
   sessionId: string;
   promptId: string;
+  responseSent: boolean;
+  finished: boolean;
   /** 是否已被取消（标志位，Agent 事件回调中检查此值决定是否继续处理） */
   cancelled: boolean;
   /**
@@ -72,6 +75,30 @@ interface ActiveTurn {
  * promptId 是服务端分配的唯一 Turn ID，用于关联 prompt 和 cancel 消息。
  */
 const activeTurns = new Map<string, ActiveTurn>();
+const activeSessionTurns = new Map<string, string>();
+
+const getSessionLockKey = (accountId: string, sessionId: string): string => `${accountId}:${sessionId}`;
+
+const sendPromptTerminal = (
+  turn: ActiveTurn,
+  client: WechatAccessWebSocketClient,
+  payload: PromptResponsePayload,
+  guid?: string,
+  userId?: string,
+): void => {
+  if (turn.responseSent) {
+    return;
+  }
+
+  turn.responseSent = true;
+  turn.finished = true;
+  activeTurns.delete(turn.promptId);
+  const sessionLockKey = getSessionLockKey(turn.accountId, turn.sessionId);
+  if (activeSessionTurns.get(sessionLockKey) === turn.promptId) {
+    activeSessionTurns.delete(sessionLockKey);
+  }
+  client.sendPromptResponse(payload, guid, userId);
+};
 
 /**
  * 处理 session.prompt 消息 — 接收用户指令并调用 Agent
@@ -113,6 +140,18 @@ export const handlePrompt = async (
   const { session_id: sessionId, prompt_id: promptId } = payload;
   const userId = message.user_id ?? "";
   const guid = message.guid ?? "";
+  const accountId = client.getAccountId();
+  const sessionLockKey = getSessionLockKey(accountId, sessionId);
+
+  if (activeSessionTurns.has(sessionLockKey)) {
+    client.sendPromptResponse({
+      session_id: sessionId,
+      prompt_id: promptId,
+      stop_reason: "error",
+      error: "同一会话已有请求正在处理中，请等待当前回复完成后再发送下一条消息。",
+    }, guid, userId);
+    return;
+  }
   //message {
   //   msg_id: '9b842a47-c07d-4307-974f-42a4f8eeecb4',
   //       guid: '0ef9cc5e5dcb7ca068b0fb9982352c33',
@@ -125,19 +164,27 @@ export const handlePrompt = async (
   //         content: [ [Object] ]
   //   }
   // }
-  const textContent = extractTextFromContent(payload.content);
-  console.log("[wechat-access-ws] 收到 prompt:", payload);
+  console.log("[wechat-access-ws] 收到 prompt:", {
+    sessionId,
+    promptId,
+    contentBlocks: payload.content.length,
+    userId,
+  });
 
   // ============================================
   // 1. 注册活跃 Turn
   // ============================================
   // 在 activeTurns Map 中注册此次请求，以便 handleCancel 能找到并取消它
   const turn: ActiveTurn = {
+    accountId,
     sessionId,
     promptId,
+    responseSent: false,
+    finished: false,
     cancelled: false,
   };
   activeTurns.set(promptId, turn);
+  activeSessionTurns.set(sessionLockKey, promptId);
 
   try {
     /**
@@ -169,7 +216,7 @@ export const handlePrompt = async (
      *
      * 这样可以复用 HTTP 通道的路由和会话管理逻辑，保持一致性。
      */
-    const { ctx, route, storePath } = buildWebSocketMessageContext(payload, userId);
+    const { ctx, route, storePath } = buildWebSocketMessageContext(payload, userId, { accountId });
 
     console.log("[wechat-access-ws] 路由信息:", {
       sessionKey: route.sessionKey,
@@ -259,7 +306,7 @@ export const handlePrompt = async (
       // 如果 Turn 已被取消，忽略后续事件（不再向服务端推送）
       if (turn.cancelled) return;
       // 过滤非本 Turn 的事件，避免并发多个 prompt 时事件串流
-      if (evt.sessionKey && evt.sessionKey !== route.sessionKey) return;
+      if (evt.sessionKey !== route.sessionKey) return;
 
       const data = evt.data as Record<string, unknown>;
 
@@ -466,11 +513,9 @@ export const handlePrompt = async (
     // ============================================
     // Agent 处理完成，取消事件订阅并清理 Turn 记录
     unsubscribe();
-    activeTurns.delete(promptId);
 
     if (turn.cancelled) {
-      // 如果在 Agent 处理期间收到了 cancel 消息，发送 cancelled 响应
-      client.sendPromptResponse({
+      sendPromptTerminal(turn, client, {
         session_id: sessionId,
         prompt_id: promptId,
         stop_reason: "cancelled",
@@ -494,7 +539,7 @@ export const handlePrompt = async (
       : [];
 
     // 发送 session.promptResponse，告知服务端本次 Turn 已正常完成
-    client.sendPromptResponse({
+    sendPromptTerminal(turn, client, {
       session_id: sessionId,
       prompt_id: promptId,
       stop_reason: "end_turn",
@@ -511,15 +556,23 @@ export const handlePrompt = async (
     // 清理活跃 Turn（取消事件订阅，从 Map 中移除）
     const currentTurn = activeTurns.get(promptId);
     currentTurn?.unsubscribe?.();
-    activeTurns.delete(promptId);
 
     // 发送错误响应，告知服务端本次 Turn 因错误终止
-    client.sendPromptResponse({
-      session_id: sessionId,
-      prompt_id: promptId,
-      stop_reason: "error",
-      error: err instanceof Error ? err.message : String(err),
-    }, guid, userId);
+    if (currentTurn) {
+      sendPromptTerminal(currentTurn, client, {
+        session_id: sessionId,
+        prompt_id: promptId,
+        stop_reason: "error",
+        error: err instanceof Error ? err.message : String(err),
+      }, guid, userId);
+    } else {
+      client.sendPromptResponse({
+        session_id: sessionId,
+        prompt_id: promptId,
+        stop_reason: "error",
+        error: err instanceof Error ? err.message : String(err),
+      }, guid, userId);
+    }
   }
 };
 
@@ -566,10 +619,9 @@ export const handleCancel = (
   // 取消 Agent 事件订阅，停止接收后续事件
   // 可选链 ?.() 是因为 unsubscribe 可能还未赋值（Turn 刚注册但还未到步骤 5）
   turn.unsubscribe?.();
-  activeTurns.delete(promptId);
 
   // 发送 cancelled 响应
-  client.sendPromptResponse({
+  sendPromptTerminal(turn, client, {
     session_id: sessionId,
     prompt_id: promptId,
     stop_reason: "cancelled",

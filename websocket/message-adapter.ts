@@ -110,7 +110,11 @@ export const promptPayloadToFuwuhaoMessage = (
  * 通过这种适配方式，WebSocket 通道和 HTTP 通道共享同一套路由和会话管理逻辑，
  * 确保两个通道的行为完全一致。
  */
-export const buildWebSocketMessageContext = (payload: PromptPayload, userId: string) => {
+export const buildWebSocketMessageContext = (
+  payload: PromptPayload,
+  userId: string,
+  options?: { accountId?: string },
+) => {
   const message = promptPayloadToFuwuhaoMessage(payload, userId);
-  return buildMessageContext(message);
+  return buildMessageContext(message, options);
 };

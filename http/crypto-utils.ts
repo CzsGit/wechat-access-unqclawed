@@ -1,3 +1,5 @@
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+
 // ============================================
 // 加密解密工具
 // ============================================
@@ -46,15 +48,15 @@ export interface DecryptMessageParams {
  * **注意：当前为简化实现，生产环境需要实现真实的 SHA-1 签名验证**
  */
 export const verifySignature = (params: VerifySignatureParams): boolean => {
-  // TODO: 实现真实的签名验证逻辑
-  // 参考算法：
-  // const arr = [params.token, params.timestamp, params.nonce, params.encrypt].sort();
-  // const str = arr.join('');
-  // const hash = crypto.createHash('sha1').update(str).digest('hex');
-  // return hash === params.signature;
-  
-  console.log("[wechat-access] 验证签名参数:", params);
-  return true; // 简化实现，直接返回 true
+  const arr = [params.token, params.timestamp, params.nonce, params.encrypt].sort();
+  const expected = createHash("sha1").update(arr.join("")).digest("hex");
+  const actual = params.signature.trim().toLowerCase();
+
+  if (expected.length !== actual.length) {
+    return false;
+  }
+
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
 };
 
 /**
@@ -72,25 +74,56 @@ export const verifySignature = (params: VerifySignatureParams): boolean => {
  * **注意：当前为简化实现，返回模拟数据，生产环境需要实现真实的 AES 解密**
  */
 export const decryptMessage = (params: DecryptMessageParams): string => {
-  // TODO: 实现真实的解密逻辑
-  // 参考算法：
-  // const key = Buffer.from(params.encodingAESKey + '=', 'base64');
-  // const iv = key.slice(0, 16);
-  // const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-  // decipher.setAutoPadding(false);
-  // let decrypted = Buffer.concat([decipher.update(params.encrypt, 'base64'), decipher.final()]);
-  // // 去除 PKCS7 填充
-  // const pad = decrypted[decrypted.length - 1];
-  // decrypted = decrypted.slice(0, decrypted.length - pad);
-  // // 提取消息内容
-  // const content = decrypted.slice(16);
-  // const msgLen = content.readUInt32BE(0);
-  // const message = content.slice(4, 4 + msgLen).toString('utf8');
-  // const receiveId = content.slice(4 + msgLen).toString('utf8');
-  // if (receiveId !== params.receiveId) throw new Error('receiveId mismatch');
-  // return message;
-  
-  console.log("[wechat-access] 解密参数:", params);
-  // 返回模拟的解密结果（标准微信消息格式）
-  return '{"msgtype":"text","Content":"Hello from 服务号","MsgId":"123456","FromUserName":"user001","ToUserName":"gh_test","CreateTime":1234567890}';
+  const key = Buffer.from(`${params.encodingAESKey}=`, "base64");
+  if (key.length !== 32) {
+    throw new Error("encodingAESKey 无效");
+  }
+
+  const iv = key.subarray(0, 16);
+  const decipher = createDecipheriv("aes-256-cbc", key, iv);
+  decipher.setAutoPadding(false);
+
+  const encrypted = Buffer.from(params.encrypt, "base64");
+  let decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  const pad = decrypted[decrypted.length - 1];
+
+  if (pad < 1 || pad > 32) {
+    throw new Error("无效的 PKCS7 padding");
+  }
+
+  decrypted = decrypted.subarray(0, decrypted.length - pad);
+  const payload = decrypted.subarray(16);
+  const msgLen = payload.readUInt32BE(0);
+  const message = payload.subarray(4, 4 + msgLen).toString("utf8");
+  const receiveId = payload.subarray(4 + msgLen).toString("utf8");
+
+  if (receiveId !== params.receiveId) {
+    throw new Error("receiveId 不匹配");
+  }
+
+  return message;
+};
+
+export const encryptMessage = (params: DecryptMessageParams, plaintext: string): string => {
+  const key = Buffer.from(`${params.encodingAESKey}=`, "base64");
+  if (key.length !== 32) {
+    throw new Error("encodingAESKey 无效");
+  }
+
+  const iv = key.subarray(0, 16);
+  const random16 = randomBytes(16);
+  const message = Buffer.from(plaintext, "utf8");
+  const msgLen = Buffer.alloc(4);
+  msgLen.writeUInt32BE(message.length, 0);
+  const corpId = Buffer.from(params.receiveId, "utf8");
+  let payload = Buffer.concat([random16, msgLen, message, corpId]);
+
+  const blockSize = 32;
+  const remainder = payload.length % blockSize;
+  const pad = remainder === 0 ? blockSize : blockSize - remainder;
+  payload = Buffer.concat([payload, Buffer.alloc(pad, pad)]);
+
+  const cipher = createCipheriv("aes-256-cbc", key, iv);
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(payload), cipher.final()]).toString("base64");
 };

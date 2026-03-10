@@ -16,6 +16,17 @@ const DEFAULT_STATE_PATH = join(homedir(), ".openclaw", "wechat-access-auth.json
 export const getStatePath = (customPath?: string): string =>
   customPath || DEFAULT_STATE_PATH;
 
+export const getAccountStatePath = (accountId?: string, customPath?: string): string => {
+  if (customPath || !accountId || accountId === "default") {
+    return getStatePath(customPath);
+  }
+
+  const basePath = getStatePath(customPath);
+  return basePath.endsWith(".json")
+    ? basePath.replace(/\.json$/i, `.${accountId}.json`)
+    : `${basePath}.${accountId}`;
+};
+
 export const loadState = (customPath?: string): PersistedAuthState | null => {
   const filePath = getStatePath(customPath);
   try {

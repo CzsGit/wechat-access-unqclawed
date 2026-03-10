@@ -14,7 +14,7 @@ export { TokenExpiredError } from "./types.js";
 export { getEnvironment } from "./environments.js";
 export { getDeviceGuid } from "./device-guid.js";
 export { QClawAPI } from "./qclaw-api.js";
-export { loadState, saveState, clearState } from "./state-store.js";
+export { loadState, saveState, clearState, getAccountStatePath } from "./state-store.js";
 export { performLogin } from "./wechat-login.js";
 export type { PerformLoginOptions } from "./wechat-login.js";
 export { buildAuthUrl, fetchQrUuid, fetchQrImageDataUrl, pollQrStatus } from "./wechat-qr-poll.js";

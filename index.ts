@@ -2,8 +2,8 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { WechatAccessWebSocketClient, handlePrompt, handleCancel } from "./websocket/index.js";
 // import { handleSimpleWecomWebhook } from "./http/webhook.js";
-import { setWecomRuntime } from "./common/runtime.js";
-import { performLogin, loadState, clearState, saveState, getDeviceGuid, getEnvironment, QClawAPI, buildAuthUrl, fetchQrUuid, fetchQrImageDataUrl, pollQrStatus } from "./auth/index.js";
+import { setWecomRuntime, getWecomRuntime } from "./common/runtime.js";
+import { performLogin, loadState, clearState, saveState, getAccountStatePath, getDeviceGuid, getEnvironment, QClawAPI, buildAuthUrl, fetchQrUuid, fetchQrImageDataUrl, pollQrStatus } from "./auth/index.js";
 import type { QClawEnvironment, PersistedAuthState } from "./auth/index.js";
 import { nested } from "./auth/utils.js";
 
@@ -15,6 +15,7 @@ const wsClients = new Map<string, WechatAccessWebSocketClient>();
 
 // QR 扫码登录中间状态（loginWithQrStart 写入，loginWithQrWait 消费）
 let pendingQrLogin: {
+  accountId: string;
   state: string;
   uuid: string;
   env: QClawEnvironment;
@@ -22,6 +23,27 @@ let pendingQrLogin: {
   bypassInvite: boolean;
   authStatePath?: string;
 } | null = null;
+
+const getChannelAccountConfig = (cfg: any, accountId?: string) => {
+  const channelCfg = cfg?.channels?.["wechat-access-unqclawed"] ?? {};
+  const resolvedAccountId = accountId ?? "default";
+  const accountCfg = channelCfg?.accounts?.[resolvedAccountId] ?? {};
+
+  return {
+    channelCfg,
+    accountCfg,
+    accountId: resolvedAccountId,
+  };
+};
+
+const getResolvedAuthStatePath = (cfg: any, accountId?: string): string | undefined => {
+  const { channelCfg, accountCfg, accountId: resolvedAccountId } = getChannelAccountConfig(cfg, accountId);
+  const configuredPath = accountCfg?.authStatePath ?? channelCfg?.authStatePath;
+  return getAccountStatePath(
+    resolvedAccountId,
+    configuredPath ? String(configuredPath) : undefined,
+  );
+};
 
 // 渠道元数据
 const meta = {
@@ -84,9 +106,13 @@ const tencentAccessPlugin = {
   // 认证适配器：openclaw channels login --channel wechat-access-unqclawed
   auth: {
     login: async ({ cfg, accountId, runtime }: { cfg: any; accountId?: string; runtime: any; verbose?: boolean; channelInput?: string }) => {
-      const channelCfg = cfg?.channels?.["wechat-access-unqclawed"];
-      const envName = channelCfg?.environment ? String(channelCfg.environment) : "production";
-      const authStatePath = channelCfg?.authStatePath ? String(channelCfg.authStatePath) : undefined;
+      const { channelCfg, accountCfg, accountId: resolvedAccountId } = getChannelAccountConfig(cfg, accountId);
+      const envName = accountCfg?.environment
+        ? String(accountCfg.environment)
+        : channelCfg?.environment
+          ? String(channelCfg.environment)
+          : "production";
+      const authStatePath = getResolvedAuthStatePath(cfg, resolvedAccountId);
 
       const env = getEnvironment(envName);
       const guid = getDeviceGuid();
@@ -121,7 +147,7 @@ const tencentAccessPlugin = {
       const { join } = await import("node:path");
       const { homedir } = await import("node:os");
       const { readFileSync, unlinkSync, existsSync } = await import("node:fs");
-      const codeTmpFile = join(homedir(), ".openclaw", "wechat-auth-code.tmp");
+      const codeTmpFile = join(homedir(), ".openclaw", `wechat-auth-code.${resolvedAccountId}.tmp`);
 
       // 清理上次残留
       try { unlinkSync(codeTmpFile); } catch { /* ignore */ }
@@ -242,17 +268,24 @@ const tencentAccessPlugin = {
   gateway: {
     startAccount: async (ctx: any) => {
       const { cfg, accountId, abortSignal, log } = ctx;
+      const { channelCfg, accountCfg, accountId: resolvedAccountId } = getChannelAccountConfig(cfg, accountId);
 
-      const tencentAccessConfig = cfg?.channels?.["wechat-access-unqclawed"];
-      let token = tencentAccessConfig?.token ? String(tencentAccessConfig.token) : "";
-      const configWsUrl = tencentAccessConfig?.wsUrl ? String(tencentAccessConfig.wsUrl) : "";
-      const bypassInvite = tencentAccessConfig?.bypassInvite === true;
-      const authStatePath = tencentAccessConfig?.authStatePath
-        ? String(tencentAccessConfig.authStatePath)
-        : undefined;
-      const envName: string = tencentAccessConfig?.environment
-        ? String(tencentAccessConfig.environment)
-        : "production";
+      let token = accountCfg?.token
+        ? String(accountCfg.token)
+        : channelCfg?.token
+          ? String(channelCfg.token)
+          : "";
+      const configWsUrl = accountCfg?.wsUrl
+        ? String(accountCfg.wsUrl)
+        : channelCfg?.wsUrl
+          ? String(channelCfg.wsUrl)
+          : "";
+      const authStatePath = getResolvedAuthStatePath(cfg, resolvedAccountId);
+      const envName: string = accountCfg?.environment
+        ? String(accountCfg.environment)
+        : channelCfg?.environment
+          ? String(channelCfg.environment)
+          : "production";
       const gatewayPort = cfg?.gateway?.port ? String(cfg.gateway.port) : "unknown";
 
       const env = getEnvironment(envName);
@@ -260,13 +293,13 @@ const tencentAccessPlugin = {
       const wsUrl = configWsUrl || env.wechatWsUrl;
 
       // 启动诊断日志
-      log?.info(`[wechat-access] 启动账号 ${accountId}`, {
+      log?.info(`[wechat-access] 启动账号 ${resolvedAccountId}`, {
         platform: process.platform,
         nodeVersion: process.version,
         hasToken: !!token,
         hasUrl: !!wsUrl,
         url: wsUrl || "(未配置)",
-        tokenPrefix: token ? token.substring(0, 6) + "..." : "(未配置)",
+        tokenPrefix: token ? `${token.substring(0, 3)}***` : "(未配置)",
       });
 
       // Token 获取策略：配置 > 已保存的登录态 > 提示用户手动登录
@@ -290,7 +323,7 @@ const tencentAccessPlugin = {
         url: wsUrl,
         token,
         guid,
-        userId: "",
+        userId: resolvedAccountId,
         gatewayPort,
         reconnectInterval: 3000,
         maxReconnectAttempts: 10,
@@ -319,19 +352,19 @@ const tencentAccessPlugin = {
         },
       });
 
-      wsClients.set(accountId, client);
+      wsClients.set(resolvedAccountId, client);
       client.start();
 
       // 等待框架发出停止信号
       await new Promise<void>((resolve) => {
         abortSignal.addEventListener("abort", () => {
-          log?.info(`[wechat-access] 停止账号 ${accountId}`);
+          log?.info(`[wechat-access] 停止账号 ${resolvedAccountId}`);
           // 始终停止当前闭包捕获的 client，避免多次 startAccount 时
           // wsClients 被新 client 覆盖后，旧 client 的 stop() 永远不被调用，导致无限重连
           client.stop();
           // 仅当 wsClients 中存的还是当前 client 时才删除，避免误删新 client
-          if (wsClients.get(accountId) === client) {
-            wsClients.delete(accountId);
+          if (wsClients.get(resolvedAccountId) === client) {
+            wsClients.delete(resolvedAccountId);
             ctx.setStatus({ running: false });
           }
           resolve();
@@ -341,15 +374,16 @@ const tencentAccessPlugin = {
 
     stopAccount: async (ctx: any) => {
       const { accountId, log } = ctx;
-      log?.info(`[wechat-access] stopAccount 钩子触发，停止账号 ${accountId}`);
-      const client = wsClients.get(accountId);
+      const resolvedAccountId = accountId ?? "default";
+      log?.info(`[wechat-access] stopAccount 钩子触发，停止账号 ${resolvedAccountId}`);
+      const client = wsClients.get(resolvedAccountId);
       if (client) {
         client.stop();
-        wsClients.delete(accountId);
+        wsClients.delete(resolvedAccountId);
         ctx.setStatus({ running: false });
-        log?.info(`[wechat-access] 账号 ${accountId} 已停止`);
+        log?.info(`[wechat-access] 账号 ${resolvedAccountId} 已停止`);
       } else {
-        log?.warn(`[wechat-access] stopAccount: 未找到账号 ${accountId} 的客户端`);
+        log?.warn(`[wechat-access] stopAccount: 未找到账号 ${resolvedAccountId} 的客户端`);
       }
     },
 
@@ -358,11 +392,15 @@ const tencentAccessPlugin = {
       try {
         const runtime = getWecomRuntime();
         const cfg = runtime.config.loadConfig();
-        const channelCfg = cfg?.channels?.["wechat-access-unqclawed"];
+        const { channelCfg, accountCfg, accountId } = getChannelAccountConfig(cfg, _params.accountId);
 
-        const envName = channelCfg?.environment ? String(channelCfg.environment) : "production";
-        const bypassInvite = channelCfg?.bypassInvite === true;
-        const authStatePath = channelCfg?.authStatePath ? String(channelCfg.authStatePath) : undefined;
+        const envName = accountCfg?.environment
+          ? String(accountCfg.environment)
+          : channelCfg?.environment
+            ? String(channelCfg.environment)
+            : "production";
+        const bypassInvite = accountCfg?.bypassInvite === true || channelCfg?.bypassInvite === true;
+        const authStatePath = getResolvedAuthStatePath(cfg, accountId);
 
         const env = getEnvironment(envName);
         const guid = getDeviceGuid();
@@ -384,7 +422,7 @@ const tencentAccessPlugin = {
         const qrDataUrl = await fetchQrImageDataUrl(uuid);
 
         // 4. 存中间状态给 loginWithQrWait 用
-        pendingQrLogin = { state, uuid, env, guid, bypassInvite, authStatePath };
+        pendingQrLogin = { accountId, state, uuid, env, guid, bypassInvite, authStatePath };
 
         return { qrDataUrl, message: "请用微信扫描二维码登录" };
       } catch (err) {
@@ -396,6 +434,10 @@ const tencentAccessPlugin = {
     loginWithQrWait: async (_params: { accountId?: string; timeoutMs?: number }) => {
       if (!pendingQrLogin) {
         return { connected: false, message: "请先执行 loginWithQrStart" };
+      }
+
+      if (_params.accountId && pendingQrLogin.accountId !== _params.accountId) {
+        return { connected: false, message: "当前扫码流程属于其他账号，请重新执行该账号的登录流程" };
       }
 
       try {

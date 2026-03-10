@@ -35,6 +35,10 @@ export interface MessageContext {
   storePath: string;
 }
 
+export interface BuildMessageContextOptions {
+  accountId?: string;
+}
+
 /**
  * 构建消息上下文
  * @param message - 微信服务号的原始消息对象
@@ -55,11 +59,15 @@ export interface MessageContext {
  * - 调用 reply.formatInboundEnvelope 格式化消息
  * - 调用 reply.finalizeInboundContext 构建最终上下文
  */
-export const buildMessageContext = (message: FuwuhaoMessage): MessageContext => {
+export const buildMessageContext = (
+  message: FuwuhaoMessage,
+  options: BuildMessageContextOptions = {},
+): MessageContext => {
   // 获取 OpenClaw 运行时实例
   const runtime = getWecomRuntime();
   // 加载全局配置（包含 Agent 配置、路由规则等）
   const cfg = runtime.config.loadConfig();
+  const accountId = options.accountId ?? "default";
   
   // ============================================
   // 1. 提取和标准化消息字段
@@ -83,7 +91,7 @@ export const buildMessageContext = (message: FuwuhaoMessage): MessageContext => 
   const frameworkRoute = runtime.channel.routing.resolveAgentRoute({
     cfg,                    // 全局配置
     channel: "wechat-access-unqclawed",     // 频道标识
-    accountId: "default",   // 账号 ID（支持多账号场景）
+    accountId,
     peer: {
       kind: "dm",           // 对话类型：dm=私聊，group=群聊
       id: userId,           // 对话对象 ID（用户 ID）

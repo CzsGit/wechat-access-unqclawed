@@ -160,6 +160,13 @@ export class WechatAccessWebSocketClient {
    */
   getState = (): ConnectionState => this.state;
 
+  getAccountId = (): string => this.config.userId || "default";
+
+  private redact = (value?: string): string => {
+    if (!value) return "(empty)";
+    return value.length <= 6 ? "***" : `${value.slice(0, 3)}***${value.slice(-2)}`;
+  };
+
   /**
    * 更新事件回调
    * @description 使用对象展开合并，只更新传入的回调，保留未传入的原有回调
@@ -178,7 +185,7 @@ export class WechatAccessWebSocketClient {
    * 服务端再转发给用户端展示流式输出效果。
    */
   sendMessageChunk = (sessionId: string, promptId: string, content: ContentBlock, guid?: string, userId?: string): void => {
-    console.log(`${this.logPrefix} [sendMessageChunk] sessionId=${sessionId}, promptId=${promptId}, guid=${guid}, userId=${userId}, content=${JSON.stringify(content).substring(0, 200)}`);
+    console.log(`${this.logPrefix} [sendMessageChunk] sessionId=${sessionId}, promptId=${promptId}, guid=${this.redact(guid)}, userId=${this.redact(userId)}, textLen=${content.text.length}`);
     const payload: UpdatePayload = {
       session_id: sessionId,
       prompt_id: promptId,
@@ -197,7 +204,7 @@ export class WechatAccessWebSocketClient {
    * 当 Agent 开始调用某个工具时发送，通知服务端展示工具调用状态。
    */
   sendToolCall = (sessionId: string, promptId: string, toolCall: ToolCall, guid?: string, userId?: string): void => {
-    console.log(`${this.logPrefix} [sendToolCall] sessionId=${sessionId}, promptId=${promptId}, guid=${guid}, userId=${userId}, toolCall=${JSON.stringify(toolCall)}`);
+    console.log(`${this.logPrefix} [sendToolCall] sessionId=${sessionId}, promptId=${promptId}, guid=${this.redact(guid)}, userId=${this.redact(userId)}, toolCallId=${toolCall.tool_call_id}, status=${toolCall.status}`);
     const payload: UpdatePayload = {
       session_id: sessionId,
       prompt_id: promptId,
@@ -216,7 +223,7 @@ export class WechatAccessWebSocketClient {
    * 当工具执行完成或失败时发送，通知服务端更新工具调用的展示状态。
    */
   sendToolCallUpdate = (sessionId: string, promptId: string, toolCall: ToolCall, guid?: string, userId?: string): void => {
-    console.log(`${this.logPrefix} [sendToolCallUpdate] sessionId=${sessionId}, promptId=${promptId}, guid=${guid}, userId=${userId}, toolCall=${JSON.stringify(toolCall)}`);
+    console.log(`${this.logPrefix} [sendToolCallUpdate] sessionId=${sessionId}, promptId=${promptId}, guid=${this.redact(guid)}, userId=${this.redact(userId)}, toolCallId=${toolCall.tool_call_id}, status=${toolCall.status}`);
     const payload: UpdatePayload = {
       session_id: sessionId,
       prompt_id: promptId,
@@ -235,7 +242,7 @@ export class WechatAccessWebSocketClient {
    */
   sendPromptResponse = (payload: PromptResponsePayload, guid?: string, userId?: string): void => {
     const contentPreview = payload.content ? JSON.stringify(payload.content).substring(0, 200) : '(empty)';
-    console.log(`${this.logPrefix} [sendPromptResponse] sessionId=${payload.session_id}, promptId=${payload.prompt_id}, stopReason=${payload.stop_reason}, guid=${guid}, userId=${userId}, content=${contentPreview}`);
+    console.log(`${this.logPrefix} [sendPromptResponse] sessionId=${payload.session_id}, promptId=${payload.prompt_id}, stopReason=${payload.stop_reason}, guid=${this.redact(guid)}, userId=${this.redact(userId)}, content=${contentPreview}`);
     this.sendEnvelope("session.promptResponse", payload, guid, userId);
   };
 
@@ -262,9 +269,9 @@ export class WechatAccessWebSocketClient {
     }
 
     this.state = "connecting";
-    console.error(`${this.logPrefix} 连接配置: url=${this.config.url}, token=${this.config.token.substring(0, 6) + '...'}, guid=${this.config.guid}, userId=${this.config.userId}`);
+    console.error(`${this.logPrefix} 连接配置: url=${this.config.url}, token=${this.redact(this.config.token)}, guid=${this.redact(this.config.guid)}, userId=${this.redact(this.config.userId)}`);
     const wsUrl = this.buildConnectionUrl();
-    console.error(`${this.logPrefix} 正在连接: ${wsUrl}`);
+    console.error(`${this.logPrefix} 正在连接: ${new URL(this.config.url).origin}`);
 
     try {
       // new WebSocket(url) 立即返回，不会阻塞
@@ -378,7 +385,7 @@ export class WechatAccessWebSocketClient {
       }
       this.processedMsgIds.add(envelope.msg_id);
 
-      console.log(`${this.logPrefix} 收到消息: method=${envelope.method}, msg_id=${envelope.msg_id}`);
+      console.log(`${this.logPrefix} 收到消息: method=${envelope.method}, msg_id=${envelope.msg_id}, guid=${this.redact(envelope.guid)}, userId=${this.redact(envelope.user_id)}`);
 
       // 根据 method 字段分发消息到对应的业务处理回调
       switch (envelope.method) {
@@ -681,8 +688,7 @@ export class WechatAccessWebSocketClient {
       // ws.send() 将字符串作为 WebSocket 文本帧发送
       this.ws.send(data);
       // 截断过长的 JSON 日志，避免日志文件膨胀
-      const jsonPreview = data.length > 500 ? data.substring(0, 500) + `...(truncated, total ${data.length} chars)` : data;
-      console.log(`${this.logPrefix} 发送消息: method=${method}, msg_id=${envelope.msg_id}, json=${jsonPreview}`);
+      console.log(`${this.logPrefix} 发送消息: method=${method}, msg_id=${envelope.msg_id}, guid=${this.redact(envelope.guid)}, userId=${this.redact(envelope.user_id)}`);
     } catch (error) {
       console.error(`${this.logPrefix} 消息发送失败:`, error);
       this.callbacks.onError?.(
